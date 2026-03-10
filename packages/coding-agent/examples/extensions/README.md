@@ -28,6 +28,8 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 
 | Extension | Description |
 |-----------|-------------|
+| `memory.ts` | Persistent memory system with daily logs, long-term memory, search, and auto-injection into system prompt |
+| `bub-memomry.ts` | Bub-inspired structured tape memory with workspace/session scoping, anchors, search, and prompt recall |
 | `todo.ts` | Todo list tool + `/todos` command with custom rendering and state persistence |
 | `hello.ts` | Minimal custom tool example |
 | `question.ts` | Demonstrates `ctx.ui.select()` for asking the user questions with custom UI |
@@ -87,6 +89,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | `claude-rules.ts` | Scans `.claude/rules/` folder and lists rules in system prompt |
 | `custom-compaction.ts` | Custom compaction that summarizes entire conversation |
 | `trigger-compact.ts` | Triggers compaction when context usage exceeds 100k tokens and adds `/trigger-compact` command |
+| `openclaw-session-pruning.ts` | TTL-aware OpenClaw-style pruning that transiently trims old tool results before eligible model calls |
 
 ### System Integration
 
