@@ -65,6 +65,21 @@ The extension registers three tools for the LLM:
 | `ralph_status` | Check completion status of all stories |
 | `ralph_append_progress` | Append a progress entry to progress.txt |
 
+## Skills
+
+The extension bundles a `ralph-prd` skill that guides the agent through creating a well-structured `prd.json`. Use it via:
+
+```
+/skill:ralph-prd
+```
+
+Or just ask "create a PRD for [feature]" and the agent will load it automatically.
+
+The skill walks through:
+1. Asking clarifying questions about the feature
+2. Generating properly sized and ordered user stories
+3. Writing `prd.json` with verifiable acceptance criteria
+
 ## Commands
 
 | Command | Description |
@@ -72,6 +87,7 @@ The extension registers three tools for the LLM:
 | `/ralph start [path] [max]` | Start the Ralph loop |
 | `/ralph stop` | Stop the auto-loop |
 | `/ralph status` | Show PRD completion status |
+| `/skill:ralph-prd` | Generate a prd.json for a feature |
 
 ## Files
 
