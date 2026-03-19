@@ -19,9 +19,12 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Type } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
+
+const extensionDir = path.dirname(fileURLToPath(import.meta.url));
 
 // ============================================================================
 // Types
@@ -176,6 +179,16 @@ export default function ralphExtension(pi: ExtensionAPI) {
 		iteration: 0,
 		maxIterations: 10,
 	};
+
+	// ------------------------------------------------------------------
+	// Skill discovery: register ralph-prd skill
+	// ------------------------------------------------------------------
+
+	pi.on("resources_discover", () => {
+		return {
+			skillPaths: [path.join(extensionDir, "skills")],
+		};
+	});
 
 	// ------------------------------------------------------------------
 	// Command: /ralph [start|stop|status]
