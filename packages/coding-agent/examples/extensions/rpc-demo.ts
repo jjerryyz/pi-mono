@@ -1,5 +1,10 @@
 /**
- * RPC Extension UI Demo
+ * RPC Extension UI Demo (runs inside pi, not a standalone RPC client)
+ *
+ * This file is an extension: pi loads it and calls your hooks with `ctx.ui.*`
+ * when the host uses RPC with extension UI enabled. To drive pi from another
+ * Node process over stdin/stdout JSONL, see `examples/rpc-minimal.ts` and
+ * `RpcClient` in `src/modes/rpc/rpc-client.ts` (also `test/rpc-example.ts`).
  *
  * Purpose-built extension that exercises all RPC-supported extension UI methods.
  * Designed to be loaded alongside the rpc-extension-ui-example.ts script to
