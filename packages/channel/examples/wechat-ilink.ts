@@ -10,7 +10,6 @@ import {
 	loadSavedAccount,
 	MSG_TYPE_USER,
 	type WeixinMessage,
-	sendWechatProcessing,
 	sendWechatText,
 	STATE_DIR,
 	SYNC_BUF_FILE,
@@ -42,6 +41,7 @@ interface GetRepliesResponse {
 interface ReplyState {
 	after: number;
 	polling: boolean;
+	pendingRuns: number;
 	priming: Promise<void> | null;
 	timer: ReturnType<typeof setInterval> | null;
 }
@@ -87,11 +87,25 @@ function getOrCreateReplyState(senderId: string): ReplyState {
 	const state: ReplyState = {
 		after: 0,
 		polling: false,
+		pendingRuns: 0,
 		priming: null,
 		timer: null,
 	};
 	replyStates.set(senderId, state);
 	return state;
+}
+
+async function ensureIntermediateState(
+	_account: AccountData,
+	_senderId: string,
+	_contextToken: string,
+	_state: ReplyState,
+): Promise<void> {
+	return;
+}
+
+async function clearIntermediateState(_account: AccountData, _senderId: string, _state: ReplyState): Promise<void> {
+	return;
 }
 
 async function primeReplyCursor(senderId: string, state: ReplyState): Promise<void> {
@@ -121,9 +135,19 @@ async function pollReplies(account: AccountData, senderId: string, state: ReplyS
 	state.polling = true;
 	try {
 		const replies = await fetchReplies(senderId, state.after);
+		if (replies.length > 0) {
+			state.pendingRuns = Math.max(0, state.pendingRuns - 1);
+			await clearIntermediateState(account, senderId, state);
+			log(`delivering ${replies.length} ${replies.length === 1 ? "reply" : "replies"} to ${senderId}`);
+		}
 		for (const reply of replies) {
 			await sendWechatText(account, senderId, reply.text, contextToken);
 			state.after = Math.max(state.after, reply.sequence);
+		}
+		if (state.pendingRuns > 0) {
+			void ensureIntermediateState(account, senderId, contextToken, state).catch((error) => {
+				logError(`failed to resume intermediate state for ${senderId}: ${error instanceof Error ? error.message : String(error)}`);
+			});
 		}
 	} catch (error) {
 		logError(`reply poll failed for ${senderId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -175,11 +199,13 @@ async function forwardMessage(account: AccountData, message: WeixinMessage, text
 
 	const contextToken = contextTokenCache.get(senderId);
 	if (contextToken) {
-		sendWechatProcessing(account, senderId, contextToken).catch((error) => {
-			logError(`failed to send processing indicator: ${error instanceof Error ? error.message : String(error)}`);
+		state.pendingRuns++;
+		void ensureIntermediateState(account, senderId, contextToken, state).catch((error) => {
+			logError(`failed to show intermediate state for ${senderId}: ${error instanceof Error ? error.message : String(error)}`);
 		});
 	}
 
+	log(`queued message from ${senderId}; pending runs=${state.pendingRuns}`);
 	ensureReplyPoller(account, senderId);
 }
 

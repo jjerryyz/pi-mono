@@ -19,6 +19,7 @@ const BOT_TYPE = "3";
 const LONG_POLL_TIMEOUT_MS = 35_000;
 const QR_STATUS_TIMEOUT_MS = 35_000;
 const QR_LOGIN_DEADLINE_MS = 480_000;
+const CONFIG_TIMEOUT_MS = 10_000;
 
 const MSG_TYPE_USER = 1;
 const MSG_TYPE_BOT = 2;
@@ -26,6 +27,8 @@ const MSG_STATE_PROCESSING = 1;
 const MSG_STATE_FINISH = 2;
 const MSG_ITEM_TEXT = 1;
 const MSG_ITEM_VOICE = 3;
+const TYPING_STATUS_PROCESSING = 1;
+const TYPING_STATUS_CANCEL = 2;
 
 export interface AccountData {
 	token: string;
@@ -77,6 +80,12 @@ export interface GetUpdatesResp {
 	errmsg?: string;
 	msgs?: WeixinMessage[];
 	get_updates_buf?: string;
+}
+
+interface GetConfigResp {
+	ret?: number;
+	errmsg?: string;
+	typing_ticket?: string;
 }
 
 function log(message: string): void {
@@ -362,6 +371,66 @@ export async function sendWechatProcessing(
 		}),
 		timeoutMs: 15_000,
 	});
+}
+
+export async function getWechatTypingTicket(
+	account: AccountData,
+	toUserId: string,
+	contextToken?: string,
+): Promise<string | undefined> {
+	const raw = await apiFetch({
+		baseUrl: account.baseUrl,
+		endpoint: "ilink/bot/getconfig",
+		token: account.token,
+		body: JSON.stringify({
+			ilink_user_id: toUserId,
+			context_token: contextToken,
+			base_info: { channel_version: CHANNEL_VERSION },
+		}),
+		timeoutMs: CONFIG_TIMEOUT_MS,
+	});
+	const response = JSON.parse(raw) as GetConfigResp;
+	if ((response.ret ?? 0) !== 0) {
+		throw new Error(`getconfig failed: ret=${response.ret ?? "?"} errmsg=${response.errmsg ?? ""}`);
+	}
+	const typingTicket = response.typing_ticket?.trim();
+	return typingTicket ? typingTicket : undefined;
+}
+
+async function sendWechatTyping(
+	account: AccountData,
+	toUserId: string,
+	typingTicket: string,
+	status: number,
+): Promise<void> {
+	await apiFetch({
+		baseUrl: account.baseUrl,
+		endpoint: "ilink/bot/sendtyping",
+		token: account.token,
+		body: JSON.stringify({
+			ilink_user_id: toUserId,
+			typing_ticket: typingTicket,
+			status,
+			base_info: { channel_version: CHANNEL_VERSION },
+		}),
+		timeoutMs: CONFIG_TIMEOUT_MS,
+	});
+}
+
+export async function startWechatTyping(
+	account: AccountData,
+	toUserId: string,
+	typingTicket: string,
+): Promise<void> {
+	await sendWechatTyping(account, toUserId, typingTicket, TYPING_STATUS_PROCESSING);
+}
+
+export async function stopWechatTyping(
+	account: AccountData,
+	toUserId: string,
+	typingTicket: string,
+): Promise<void> {
+	await sendWechatTyping(account, toUserId, typingTicket, TYPING_STATUS_CANCEL);
 }
 
 export { MSG_TYPE_USER };

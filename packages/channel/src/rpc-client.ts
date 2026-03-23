@@ -18,7 +18,7 @@ interface RpcErrorResponse {
 
 type RpcResponse<T = undefined> = RpcSuccessResponse<T> | RpcErrorResponse;
 
-interface RpcEvent {
+export interface RpcEvent {
 	type: string;
 	[key: string]: unknown;
 }

@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Server, type Socket } from "socket.io";
-import { PiRpcClient } from "./rpc-client.js";
+import { PiRpcClient, type RpcEvent } from "./rpc-client.js";
 import { ChannelStore, ensureDataDir } from "./store.js";
 import type {
 	BridgeReadyPayload,
@@ -131,6 +131,83 @@ function roomForChannel(channelId: string): string {
 	return `channel:${encodeURIComponent(channelId)}`;
 }
 
+function previewText(text: string, maxLength = 80): string {
+	const normalized = text.replaceAll(/\s+/g, " ").trim();
+	if (normalized.length <= maxLength) {
+		return normalized;
+	}
+	return `${normalized.slice(0, maxLength - 1)}...`;
+}
+
+function extractTextFromAgentMessage(message: unknown): string | null {
+	if (!isRecord(message) || !Array.isArray(message.content)) {
+		return null;
+	}
+
+	const text = message.content
+		.map((block) => {
+			if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") {
+				return "";
+			}
+			return block.text;
+		})
+		.join("")
+		.trim();
+	return text || null;
+}
+
+function describeRpcEvent(event: RpcEvent): string | null {
+	switch (event.type) {
+		case "agent_start":
+			return "rpc agent started";
+		case "turn_start":
+			return `rpc turn ${typeof event.turnIndex === "number" ? event.turnIndex : "?"} started`;
+		case "message_start":
+			if (isRecord(event.message) && typeof event.message.role === "string") {
+				return `rpc message start: ${event.message.role}`;
+			}
+			return "rpc message start";
+		case "message_update":
+			if (!isRecord(event.assistantMessageEvent) || typeof event.assistantMessageEvent.type !== "string") {
+				return null;
+			}
+			switch (event.assistantMessageEvent.type) {
+				case "thinking_start":
+					return "rpc assistant thinking";
+				case "toolcall_start":
+					return "rpc assistant preparing tool call";
+				case "text_start":
+					return "rpc assistant responding";
+				default:
+					return null;
+			}
+		case "message_end":
+			if (isRecord(event.message) && event.message.role === "assistant") {
+				const text = extractTextFromAgentMessage(event.message);
+				return text ? `rpc assistant done: ${previewText(text)}` : "rpc assistant done";
+			}
+			if (isRecord(event.message) && typeof event.message.role === "string") {
+				return `rpc message end: ${event.message.role}`;
+			}
+			return "rpc message end";
+		case "tool_execution_start":
+			return typeof event.toolName === "string" ? `rpc tool start: ${event.toolName}` : "rpc tool start";
+		case "tool_execution_update":
+			return typeof event.toolName === "string" ? `rpc tool update: ${event.toolName}` : "rpc tool update";
+		case "tool_execution_end":
+			if (typeof event.toolName === "string") {
+				return `rpc tool ${event.isError === true ? "error" : "done"}: ${event.toolName}`;
+			}
+			return `rpc tool ${event.isError === true ? "error" : "done"}`;
+		case "turn_end":
+			return `rpc turn ${typeof event.turnIndex === "number" ? event.turnIndex : "?"} ended`;
+		case "agent_end":
+			return "rpc agent ended";
+		default:
+			return null;
+	}
+}
+
 function sendJson(res: ServerResponse, statusCode: number, body: unknown): void {
 	res.writeHead(statusCode, {
 		"content-type": "application/json; charset=utf-8",
@@ -169,6 +246,10 @@ class ChannelRuntime {
 	private queueChain = Promise.resolve();
 	private pendingCount = 0;
 
+	private log(message: string): void {
+		console.log(`[pi-channel] [${this.channelId}] ${message}`);
+	}
+
 	constructor(
 		private readonly options: ChannelBridgeOptions,
 		private readonly store: ChannelStore,
@@ -187,15 +268,24 @@ class ChannelRuntime {
 
 	enqueue(event: ChannelInboundEvent): void {
 		this.pendingCount++;
+		this.log(`queued inbound event; pending=${this.pendingCount}`);
 		this.queueChain = this.queueChain
 			.then(async () => {
 				const client = await this.ensureStarted();
+				const startedAt = Date.now();
+				this.log(`dispatching prompt: ${previewText(event.content)}`);
 				await this.store.logInbound({
 					...event,
 					timestamp: new Date().toISOString(),
 				});
 				const result = await client.promptAndWait(formatChannelPrompt(event), 180000);
+				this.log(
+					`prompt completed in ${Date.now() - startedAt}ms; tools=${
+						result.successfulToolNames.length > 0 ? result.successfulToolNames.join(", ") : "none"
+					}`,
+				);
 				if (!result.successfulToolNames.includes("channel_reply") && result.assistantText) {
+					this.log(`persisting assistant reply: ${previewText(result.assistantText)}`);
 					await this.onReply({
 						channelId: this.channelId,
 						text: result.assistantText,
@@ -203,10 +293,12 @@ class ChannelRuntime {
 				}
 			})
 			.catch((error: unknown) => {
+				this.log(`prompt failed: ${error instanceof Error ? error.message : String(error)}`);
 				this.onError(this.channelId, error instanceof Error ? error : new Error(String(error)));
 			})
 			.finally(() => {
 				this.pendingCount--;
+				this.log(`queue settled; pending=${this.pendingCount}`);
 			});
 	}
 
@@ -240,7 +332,15 @@ class ChannelRuntime {
 			...(this.options.model ? { model: this.options.model } : {}),
 		});
 		await client.start();
+		client.onEvent((event) => {
+			const description = describeRpcEvent(event);
+			if (description) {
+				this.log(description);
+			}
+		});
+		this.log("rpc client started");
 		await client.setSessionName(`channel:${this.channelId}`);
+		this.log("rpc session name set");
 		this.client = client;
 		return client;
 	}
