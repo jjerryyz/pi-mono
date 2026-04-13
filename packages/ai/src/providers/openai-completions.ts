@@ -127,36 +127,30 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			};
 
 			for await (const chunk of openaiStream) {
+				if (!chunk || typeof chunk !== "object") continue;
+
+				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
+				// and each chunk in a streamed completion carries the same id.
+				output.responseId ||= chunk.id;
 				if (chunk.usage) {
-					const cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens || 0;
-					const reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens || 0;
-					const input = (chunk.usage.prompt_tokens || 0) - cachedTokens;
-					const outputTokens = (chunk.usage.completion_tokens || 0) + reasoningTokens;
-					output.usage = {
-						// OpenAI includes cached tokens in prompt_tokens, so subtract to get non-cached input
-						input,
-						output: outputTokens,
-						cacheRead: cachedTokens,
-						cacheWrite: 0,
-						// Compute totalTokens ourselves since we add reasoning_tokens to output
-						// and some providers (e.g., Groq) don't include them in total_tokens
-						totalTokens: input + outputTokens + cachedTokens,
-						cost: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							total: 0,
-						},
-					};
-					calculateCost(model, output.usage);
+					output.usage = parseChunkUsage(chunk.usage, model);
 				}
 
-				const choice = chunk.choices?.[0];
+				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
 				if (!choice) continue;
 
+				// Fallback: some providers (e.g., Moonshot) return usage
+				// in choice.usage instead of the standard chunk.usage
+				if (!chunk.usage && (choice as any).usage) {
+					output.usage = parseChunkUsage((choice as any).usage, model);
+				}
+
 				if (choice.finish_reason) {
-					output.stopReason = mapStopReason(choice.finish_reason);
+					const finishReasonResult = mapStopReason(choice.finish_reason);
+					output.stopReason = finishReasonResult.stopReason;
+					if (finishReasonResult.errorMessage) {
+						output.errorMessage = finishReasonResult.errorMessage;
+					}
 				}
 
 				if (choice.delta) {
@@ -285,8 +279,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				throw new Error("Request was aborted");
 			}
 
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
+			if (output.stopReason === "aborted") {
+				throw new Error("Request was aborted");
+			}
+			if (output.stopReason === "error") {
+				throw new Error(output.errorMessage || "Provider returned an error stop reason");
 			}
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });
@@ -407,9 +404,18 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 		params.tool_choice = options.toolChoice;
 	}
 
-	if ((compat.thinkingFormat === "zai" || compat.thinkingFormat === "qwen") && model.reasoning) {
-		// Both Z.ai and Qwen use enable_thinking: boolean
+	if (compat.thinkingFormat === "zai" && model.reasoning) {
 		(params as any).enable_thinking = !!options?.reasoningEffort;
+	} else if (compat.thinkingFormat === "qwen" && model.reasoning) {
+		(params as any).enable_thinking = !!options?.reasoningEffort;
+	} else if (compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
+		(params as any).chat_template_kwargs = { enable_thinking: !!options?.reasoningEffort };
+	} else if (compat.thinkingFormat === "openrouter" && options?.reasoningEffort && model.reasoning) {
+		// OpenRouter normalizes reasoning across providers via a nested reasoning object.
+		const openRouterParams = params as typeof params & { reasoning?: { effort?: string } };
+		openRouterParams.reasoning = {
+			effort: mapReasoningEffort(options.reasoningEffort, compat.reasoningEffortMap),
+		};
 	} else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
 		// OpenAI-style reasoning_effort
 		(params as any).reasoning_effort = mapReasoningEffort(options.reasoningEffort, compat.reasoningEffortMap);
@@ -559,15 +565,12 @@ export function convertMessages(
 			// Filter out empty text blocks to avoid API validation errors
 			const nonEmptyTextBlocks = textBlocks.filter((b) => b.text && b.text.trim().length > 0);
 			if (nonEmptyTextBlocks.length > 0) {
-				// GitHub Copilot requires assistant content as a string, not an array.
-				// Sending as array causes Claude models to re-answer all previous prompts.
-				if (model.provider === "github-copilot") {
-					assistantMsg.content = nonEmptyTextBlocks.map((b) => sanitizeSurrogates(b.text)).join("");
-				} else {
-					assistantMsg.content = nonEmptyTextBlocks.map((b) => {
-						return { type: "text", text: sanitizeSurrogates(b.text) };
-					});
-				}
+				// Always send assistant content as a plain string (OpenAI Chat Completions
+				// API standard format). Sending as an array of {type:"text", text:"..."}
+				// objects is non-standard and causes some models (e.g. DeepSeek V3.2 via
+				// NVIDIA NIM) to mirror the content-block structure literally in their
+				// output, producing recursive nesting like [{'type':'text','text':'[{...}]'}].
+				assistantMsg.content = nonEmptyTextBlocks.map((b) => sanitizeSurrogates(b.text)).join("");
 			}
 
 			// Handle thinking blocks
@@ -720,22 +723,57 @@ function convertTools(
 	}));
 }
 
-function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"]): StopReason {
-	if (reason === null) return "stop";
+function parseChunkUsage(
+	rawUsage: {
+		prompt_tokens?: number;
+		completion_tokens?: number;
+		prompt_tokens_details?: { cached_tokens?: number };
+		completion_tokens_details?: { reasoning_tokens?: number };
+	},
+	model: Model<"openai-completions">,
+): AssistantMessage["usage"] {
+	const cachedTokens = rawUsage.prompt_tokens_details?.cached_tokens || 0;
+	const reasoningTokens = rawUsage.completion_tokens_details?.reasoning_tokens || 0;
+	// OpenAI includes cached tokens in prompt_tokens, so subtract to get non-cached input
+	const input = (rawUsage.prompt_tokens || 0) - cachedTokens;
+	// Compute totalTokens ourselves since we add reasoning_tokens to output
+	// and some providers (e.g., Groq) don't include them in total_tokens
+	const outputTokens = (rawUsage.completion_tokens || 0) + reasoningTokens;
+	const usage: AssistantMessage["usage"] = {
+		input,
+		output: outputTokens,
+		cacheRead: cachedTokens,
+		cacheWrite: 0,
+		totalTokens: input + outputTokens + cachedTokens,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	calculateCost(model, usage);
+	return usage;
+}
+
+function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
+	stopReason: StopReason;
+	errorMessage?: string;
+} {
+	if (reason === null) return { stopReason: "stop" };
 	switch (reason) {
 		case "stop":
-			return "stop";
+		case "end":
+			return { stopReason: "stop" };
 		case "length":
-			return "length";
+			return { stopReason: "length" };
 		case "function_call":
 		case "tool_calls":
-			return "toolUse";
+			return { stopReason: "toolUse" };
 		case "content_filter":
-			return "error";
-		default: {
-			const _exhaustive: never = reason;
-			throw new Error(`Unhandled stop reason: ${_exhaustive}`);
-		}
+			return { stopReason: "error", errorMessage: "Provider finish_reason: content_filter" };
+		case "network_error":
+			return { stopReason: "error", errorMessage: "Provider finish_reason: network_error" };
+		default:
+			return {
+				stopReason: "error",
+				errorMessage: `Provider finish_reason: ${reason}`,
+			};
 	}
 }
 
@@ -786,7 +824,11 @@ function detectCompat(model: Model<"openai-completions">): Required<OpenAIComple
 		requiresToolResultName: false,
 		requiresAssistantAfterToolResult: false,
 		requiresThinkingAsText: false,
-		thinkingFormat: isZai ? "zai" : "openai",
+		thinkingFormat: isZai
+			? "zai"
+			: provider === "openrouter" || baseUrl.includes("openrouter.ai")
+				? "openrouter"
+				: "openai",
 		openRouterRouting: {},
 		vercelGatewayRouting: {},
 		supportsStrictMode: true,

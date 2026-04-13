@@ -7,6 +7,7 @@ export {
 	type BashToolOptions,
 	bashTool,
 	createBashTool,
+	createLocalBashOperations,
 } from "./bash.js";
 export {
 	createEditTool,
@@ -16,6 +17,7 @@ export {
 	type EditToolOptions,
 	editTool,
 } from "./edit.js";
+export { withFileMutationQueue } from "./file-mutation-queue.js";
 export {
 	createFindTool,
 	type FindOperations,

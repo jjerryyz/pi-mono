@@ -24,9 +24,9 @@ export type {
 	// Re-exports
 	AgentToolResult,
 	AgentToolUpdateCallback,
-	// App keybindings (for custom editors)
-	AppAction,
 	AppendEntryHandler,
+	// App keybindings (for custom editors)
+	AppKeybinding,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,
 	BashToolResultEvent,
@@ -163,9 +163,4 @@ export {
 	isToolCallEventType,
 	isWriteToolResult,
 } from "./types.js";
-export {
-	wrapRegisteredTool,
-	wrapRegisteredTools,
-	wrapToolsWithExtensions,
-	wrapToolWithExtensions,
-} from "./wrapper.js";
+export { wrapRegisteredTool, wrapRegisteredTools } from "./wrapper.js";
